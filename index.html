@@ -44,11 +44,6 @@
   #periodText{font-size:11.5px;color:var(--brown-muted);font-weight:600;letter-spacing:.02em}
 
   /* 分類折疊式膠囊收納塢 (.cozy-dock & .dock-popover) */
-  #meadowBar{
-    position:fixed;left:50%;bottom:14px;transform:translateX(-50%);
-    display:flex;flex-direction:column;align-items:center;gap:8px;z-index:6;
-    pointer-events:none;width:max-content;max-width:96vw;
-  }
   .cozy-dock{
     display:inline-flex;align-items:center;gap:6px;padding:6px 8px;
     background:rgba(255,250,242,0.82);
@@ -1661,8 +1656,12 @@ function vnoise(x,z){
   return lerp(lerp(a,b,u),lerp(c,d,u),v)*2-1;
 }
 
-/* ============ 6. 渲染器 / 場景 / 相機 ============ */
-const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+/* ============ 6. 渲染器 / 場景 / 相機（手機端溫控省電優化：關閉硬體 MSAA 與高功耗模式） ============ */
+const isMobileDevice = isTouch || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+const renderer = new THREE.WebGLRenderer({
+  antialias: !isMobileDevice,
+  powerPreference: isMobileDevice ? 'default' : 'high-performance'
+});
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.NoToneMapping;
@@ -5520,7 +5519,7 @@ const grassMat = new THREE.ShaderMaterial({
 });
 
 // 30,000 簇長草（共 90,000 片草葉）：覆蓋擴大後的整座浮島，並嚴格排除石頭小路與室內建築地板！
-const NG_HIGH = 30000, NG_LOW = 12000;
+const NG_HIGH = 30000, NG_LOW = isMobileDevice ? 8000 : 12000;
 const grassMesh = new THREE.InstancedMesh(createGrassTuftGeo(), grassMat, NG_HIGH);
 grassMesh.frustumCulled = false;
 {
@@ -7121,14 +7120,19 @@ function setupComposer(){
 setupComposer();
 function setQuality(q){
   state.quality = q; useBloom = q==='high';
-  const pr = q==='high' ? Math.min(devicePixelRatio,2) : 1;
+  const pr = q==='high'
+    ? Math.min(devicePixelRatio, isMobileDevice ? 1.35 : 2)
+    : (isMobileDevice ? Math.min(devicePixelRatio, 0.95) : 1);
   renderer.setPixelRatio(pr); composer.setPixelRatio(pr);
-  const ms = q==='high'?2048:1024;
+  const ms = q==='high' ? (isMobileDevice ? 1024 : 2048) : (isMobileDevice ? 768 : 1024);
   sunLight.shadow.mapSize.set(ms,ms);
   if(sunLight.shadow.map){ sunLight.shadow.map.dispose(); sunLight.shadow.map=null; }
-  ffGeo.setDrawRange(0, q==='high' ? FF : 40);
+  renderer.shadowMap.autoUpdate = (q==='high' && !isMobileDevice);
+  renderer.shadowMap.needsUpdate = true;
+  ffGeo.setDrawRange(0, q==='high' ? FF : 32);
   grassMesh.count = q==='high' ? NG_HIGH : NG_LOW;
-  allCanopyMeshes.forEach(m => { if(m.userData.fullCount) m.count = q==='high' ? m.userData.fullCount : Math.ceil(m.userData.fullCount * 0.45); });
+  const canopyRatio = q==='high' ? (isMobileDevice ? 0.72 : 1.0) : (isMobileDevice ? 0.38 : 0.45);
+  allCanopyMeshes.forEach(m => { if(m.userData.fullCount) m.count = Math.ceil(m.userData.fullCount * canopyRatio); });
   outlineMat.visible = (q==='high');
   resize();
   $('selQuality').value = q;
@@ -7468,7 +7472,15 @@ if($('btnToggleLayoutMode')) $('btnToggleLayoutMode').addEventListener('click', 
 
 // 關閉網頁、重新整理或手機切換 App 時自動即時存檔，確保進度 100% 不遺失！
 addEventListener('beforeunload', ()=>save(false));
-document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'hidden') save(false); });
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'hidden'){
+    save(false);
+    if(actx && actx.state === 'running') actx.suspend().catch(()=>{});
+  } else if(document.visibilityState === 'visible'){
+    clock.getDelta();
+    if(actx && actx.state === 'suspended' && !state.muted) actx.resume().catch(()=>{});
+  }
+});
 
 $('btnSettings').addEventListener('click', togglePanel);
 $('btnClose').addEventListener('click', ()=>closePanels());
@@ -8104,10 +8116,29 @@ function updateCamera(dt, t){
   camera.position.set(px,py,pz); camera.lookAt(cam.target);
 }
 
-/* ============ 32. 主迴圈 ============ */
-const clock = new THREE.Clock(); let hudT=0, saveT=0, fpsT=0, fpsN=0, started=false;
-function frame(){
-  const dt = Math.min(clock.getDelta(),0.05), t = clock.elapsedTime;
+/* ============ 32. 主迴圈（含手機端智慧溫控鎖幀與省電渲染排程） ============ */
+const clock = new THREE.Clock();
+let hudT=0, saveT=0, fpsT=0, fpsN=0, envT=0, started=false;
+let lastFrameMs = 0, idleTimer = 0, frameTick = 0;
+
+function frame(nowMs=0){
+  if(document.hidden) return;
+
+  // 手機端或低畫質模式智慧溫控鎖幀：操作移動時鎖定約 45 FPS，靜止發呆或打開面板超過 3 秒時自動降至 28 FPS 大幅降溫！
+  const useThermalCap = isMobileDevice || isMobileLayout || state.quality === 'low';
+  if(useThermalCap && started && nowMs > 0){
+    const isUserActive = keys.size > 0 || Math.hypot(joy.x, joy.y) > 0.05 || Object.keys(touches).length > 0 || state.targetH !== null || fish.state !== 'idle' || isCookingAnim;
+    const targetFps = (anyPanelOpen() || idleTimer > 3.5) ? 28 : 45;
+    const minInterval = 1000 / targetFps;
+    if(nowMs - lastFrameMs < minInterval - 0.5) return;
+    lastFrameMs = nowMs;
+    if(isUserActive) idleTimer = 0;
+  }
+
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  frameTick++;
+  idleTimer += dt;
+
   if(state.targetH !== null){
     let diff = state.targetH - state.h;
     if(diff > 0.5) diff -= 1;
@@ -8115,6 +8146,7 @@ function frame(){
     if(Math.abs(diff) < 0.003){
       state.h = state.targetH;
       state.targetH = null;
+      applyEnvironment();
     } else {
       state.h = (state.h + diff * Math.min(1, dt*4.5) + 1) % 1;
     }
@@ -8133,13 +8165,19 @@ function frame(){
   updateForageParticles(dt,t);
   updateDandelions(dt,t);
   updatePetals(dt,t);
-  updateWindRibbons(dt,t);
+  if(!useThermalCap || frameTick % 2 === 0) updateWindRibbons(dt * (useThermalCap ? 2 : 1), t);
   updateShootingStars(dt);
   updateStoveAnim(dt,t);
   updateRipples(dt);
   updateSoundscape(dt);
   updateCamera(dt,t);
-  applyEnvironment();
+
+  // 非快轉時段下每 0.20 秒更新一次全域環境光影，減少 90% 重複 Color/Shader Uniform 運算
+  envT += dt;
+  if(state.targetH !== null || envT >= 0.20){
+    envT = 0;
+    applyEnvironment();
+  }
 
   sky.position.copy(camera.position); stars.position.copy(camera.position);
   sunMesh.position.copy(camera.position).addScaledVector(sunDir,700);
@@ -8158,12 +8196,17 @@ function frame(){
     s.visible=true;
     const k=1+0.2*Math.sin(t*1.5+s.userData.ph); s.scale.set(s.userData.base*k, s.userData.base*0.7*k, s.userData.base*k);
   });
-  const activeFF = state.quality==='high' ? FF : 40;
+  const activeFF = state.quality==='high' ? FF : 32;
   for(let i=0;i<activeFF;i++){
     const b=ffBase[i], a=t*b.sp+b.ph;
     ffPos[i*3]=b.x+Math.cos(a)*1.2; ffPos[i*3+1]=b.y+Math.sin(a*1.7)*0.5; ffPos[i*3+2]=b.z+Math.sin(a*0.8)*1.2;
   }
   ffGeo.attributes.position.needsUpdate = true;
+
+  // 手機端與低畫質模式下每 2 幀更新一次陰影貼圖，降低 50% 陰影頂點渲染負載
+  if(!renderer.shadowMap.autoUpdate && frameTick % 2 === 0){
+    renderer.shadowMap.needsUpdate = true;
+  }
 
   hudT+=dt; if(hudT>0.25){ hudT=0; updateHUD(); }
   saveT+=dt; if(saveT>5){ saveT=0; save(false); }
