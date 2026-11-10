@@ -1,6 +1,6 @@
 # 🐾 芝麻歷險記 (Sesame's Adventure)
 
-**《芝麻歷險記》（Sesame's Adventure）** 是一款運行於瀏覽器的療癒系 3D 浮島探索與慢活養成網頁遊戲，基於 [Three.js](https://threejs.org/)（WebGL r160）與原生 [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) 打造。全專案採用零依賴打包的單一檔案架構（`index.html`），支援電腦與手機雙端自適應排版、中英雙語自動識別，以及瀏覽器自動存檔。
+**《芝麻歷險記》（Sesame's Adventure）** 是一款我在閑暇時間利用AI全程製作的運行於瀏覽器的療癒系 3D 浮島探索與慢活養成網頁遊戲，基於 [Three.js](https://threejs.org/)（WebGL r160）與原生 [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) 打造。全專案採用零依賴打包的單一檔案架構（`index.html`），支援電腦與手機雙端自適應排版、中英雙語自動識別，以及瀏覽器自動存檔。
 
 * **線上遊玩網址**：[https://sesameworld.pages.dev](https://www.google.com/search?q=https://sesameworld.pages.dev)
 * **GitHub 儲存庫**：`sesame-game`
